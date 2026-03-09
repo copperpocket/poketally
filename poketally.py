@@ -5,6 +5,9 @@ import cv2
 import pytesseract
 import numpy as np
 import mss
+import csv
+from PyQt6.QtWidgets import QCompleter
+from datetime import datetime
 from Xlib import display, X
 from difflib import SequenceMatcher
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, 
@@ -17,17 +20,31 @@ class PokeTally(QWidget):
         super().__init__()
         self.file_path = "hunt_stats.json"
         self.pokemon_file = "pokemon_list.txt"
+        self.log_file = "encounter_log.csv"
         self.last_detected_name = None
         
         self.data = self.load_data()
         self.master_list = self.load_pokemon_list()
         
         self.init_ui()
+        self.ensure_csv_header()
         self.sct = mss.mss()
 
         self.detector_timer = QTimer()
         self.detector_timer.timeout.connect(self.scan_for_pokemon)
         self.detector_timer.start(2000)
+
+    def ensure_csv_header(self):
+        if not os.path.exists(self.log_file):
+            with open(self.log_file, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Timestamp", "Pokemon", "OCR_Text", "Confidence", "Is_Target"])
+
+    def log_to_csv(self, name, ocr_text, conf, is_target):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(self.log_file, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([timestamp, name, ocr_text, round(conf, 2), is_target])
 
     def load_pokemon_list(self):
         if os.path.exists(self.pokemon_file):
@@ -37,8 +54,6 @@ class PokeTally(QWidget):
 
     def get_best_match(self, ocr_text):
         ocr_text = ocr_text.upper().strip()
-        
-        # --- GENDER INTERCEPT ---
         is_nidoran_base = "NIDOR" in ocr_text or "MIDOR" in ocr_text
         is_evolved = any(x in ocr_text for x in ("INA", "INO", "IMO"))
         
@@ -48,7 +63,6 @@ class PokeTally(QWidget):
             if any(marker in ocr_text for marker in ("Q", "0", "O", "F")):
                 return ("NIDORAN-F", 0.95)
 
-        # --- STANDARD MATCHING ---
         best_name = None
         highest_ratio = 0
         for name in self.master_list:
@@ -95,16 +109,11 @@ class PokeTally(QWidget):
             sct_img = self.sct.grab(monitor)
             cv_img = np.array(sct_img)
             cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGRA2BGR)
-            
-            # Save Raw Capture
             cv2.imwrite("debug_raw.png", cv_img)
             
-            # Process
             cv_img = cv2.resize(cv_img, None, fx=4, fy=4, interpolation=cv2.INTER_NEAREST)
             gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
             _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
-            
-            # Save OCR View
             cv2.imwrite("debug_ocr.png", thresh)
             
             raw_text = pytesseract.image_to_string(thresh, config=r'--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ-580Q').strip()
@@ -117,8 +126,10 @@ class PokeTally(QWidget):
                 print(f"Detected: {best_name} (OCR: '{raw_text}' | Conf: {confidence:.2f})")
                 self.last_detected_name = best_name
                 
-                if best_name == self.data["target_name"].upper():
-                    print(f"*** TARGET MATCH! ***")
+                is_target = best_name == self.data["target_name"].upper()
+                self.log_to_csv(best_name, raw_text, confidence, is_target)
+
+                if is_target:
                     self.add_target()
                 else:
                     self.add_generic()
@@ -133,22 +144,27 @@ class PokeTally(QWidget):
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
         self.setStyleSheet("background-color: #1e1e1e; color: #ffffff;")
         layout = QVBoxLayout()
+
         self.total_lbl = QLabel(str(self.data['total']))
         self.total_lbl.setStyleSheet("font-size: 32px; font-weight: bold;")
         self.total_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(QLabel("TOTAL ENCOUNTERS"))
         layout.addWidget(self.total_lbl)
+
         self.target_header = QLabel(f"{self.data['target_name'].upper()} ENCOUNTERS")
         self.target_val_lbl = QLabel(str(self.data['target']))
         self.target_val_lbl.setStyleSheet("font-size: 24px; color: #3498db;")
         self.target_val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.target_header)
         layout.addWidget(self.target_val_lbl)
+
         btn_layout = QHBoxLayout()
         b1 = QPushButton("+1 Any"); b1.clicked.connect(self.add_generic)
-        b2 = QPushButton(f"+1 {self.data['target_name']}"); b2.clicked.connect(self.add_target)
-        btn_layout.addWidget(b1); btn_layout.addWidget(b2)
+        self.target_btn = QPushButton(f"+1 {self.data['target_name']}")
+        self.target_btn.clicked.connect(self.add_target)
+        btn_layout.addWidget(b1); btn_layout.addWidget(self.target_btn)
         layout.addLayout(btn_layout)
+
         util_layout = QHBoxLayout()
         s = QPushButton("Settings"); s.clicked.connect(self.open_settings)
         r = QPushButton("Reset"); r.clicked.connect(self.reset_tally)
@@ -160,23 +176,45 @@ class PokeTally(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
         l = QVBoxLayout(dialog)
+
         p_in = QLineEdit(self.data["target_name"])
         w_in = QLineEdit(self.data["window_title"])
-        l.addWidget(QLabel("Target:")); l.addWidget(p_in)
-        l.addWidget(QLabel("Window:")); l.addWidget(w_in)
+        
+        # AUTOCOMPLETE
+        completer = QCompleter(self.master_list)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        p_in.setCompleter(completer)
+
+        l.addWidget(QLabel("Target Name (e.g. 'Pika'):"))
+        l.addWidget(p_in)
+        l.addWidget(QLabel("Window Title:"))
+        l.addWidget(w_in)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(dialog.accept); bb.rejected.connect(dialog.reject); l.addWidget(bb)
+        
         if dialog.exec():
-            self.data["target_name"] = p_in.text().strip().capitalize()
+            # RESTORED PREDICTION LOGIC
+            new_val = p_in.text().strip()
+            best_name, ratio = self.get_best_match(new_val)
+            
+            # If we found a good match in our master list, use that!
+            if best_name and ratio > 0.5:
+                self.data["target_name"] = best_name.capitalize()
+            else:
+                self.data["target_name"] = new_val.capitalize()
+                
             self.data["window_title"] = w_in.text().strip()
             self.update_stats()
 
     def add_generic(self): self.data['total'] += 1; self.update_stats()
     def add_target(self): self.data['total'] += 1; self.data['target'] += 1; self.update_stats()
+    
     def update_stats(self):
         self.total_lbl.setText(str(self.data['total']))
         self.target_header.setText(f"{self.data['target_name'].upper()} ENCOUNTERS")
         self.target_val_lbl.setText(str(self.data['target']))
+        self.target_btn.setText(f"+1 {self.data['target_name']}") 
         self.save_data()
 
     def load_data(self):
