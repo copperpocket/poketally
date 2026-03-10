@@ -24,6 +24,9 @@ class MasterDashboard(QWidget):
         self.num_instances = num_instances
         self.data_dir = "data"
         if not os.path.exists(self.data_dir): os.makedirs(self.data_dir)
+
+        self.debug_dir = os.path.join(self.data_dir, "debug")
+        if not os.path.exists(self.debug_dir): os.makedirs(self.debug_dir)
         
         self.pokemon_file = "pokemon_list.txt"
         self.workers = []  
@@ -396,8 +399,8 @@ class PokeTally(QWidget):
                 cv2.rectangle(debug_frame, (gx, gy), (gx+gw, gy+gh), (255, 0, 0), 2) 
                 # Green: The Name ROI
                 cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
-                cv2.imwrite(f"data/match_preview_{self.instance_id}.png", debug_frame)
-                cv2.imwrite(f"data/ocr_debug_{self.instance_id}.png", thresh)
+                cv2.imwrite(f"data/debug/match_preview_{self.instance_id}.png", debug_frame)
+                cv2.imwrite(f"data/debug/ocr_debug_{self.instance_id}.png", thresh)
 
             # DETECTION LOGIC
             if len(raw_text) >= 3:
