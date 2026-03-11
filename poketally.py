@@ -226,20 +226,49 @@ class MasterDashboard(QWidget):
     def build_grid(self):
         for i in reversed(range(self.grid.count())): 
             if self.grid.itemAt(i).widget(): self.grid.itemAt(i).widget().setParent(None)
+
+        self.instance_frames = {} # To track the emulation windows
         self.instance_widgets = {}
+        self.audio_indicators = {} # Track the "Live" icons
+
         for i in range(1, self.num_instances + 1):
             frame = QFrame()
+            self.instance_frames[i] = frame
             frame.setStyleSheet("background-color: #1e1e1e; border-radius: 6px; border: 1px solid #333;")
+            
             f_layout = QVBoxLayout(frame)
-            title = QLabel(f"GAME {i}"); title.setStyleSheet("color: #555; font-size: 10px; font-weight: bold; border: none;")
+
+            # --- HEADER ROW (Title + Indicator) ---
+            header_row = QHBoxLayout()
+            title = QLabel(f"GAME {i}")
+            title.setStyleSheet("color: #555; font-size: 10px; font-weight: bold; border: none;")
+
+            # Sublte Audio/Live Indicator (Hidden by default)
+            indicator = QLabel("🔊 LIVE") 
+            indicator.setStyleSheet("color: #27ae60; font-size: 10px; font-weight: bold; border: none;")
+            indicator.setVisible(False) 
+            self.audio_indicators[i] = indicator
+
+            header_row.addWidget(title)
+            header_row.addStretch()
+            header_row.addWidget(indicator)
+
+            f_layout.addLayout(header_row)
+
             t_row, g_row = QHBoxLayout(), QHBoxLayout()
             t_val = QLabel("0"); t_val.setStyleSheet("color: #f1c40f; font-size: 18px; font-weight: bold; border: none;")
             g_val = QLabel("0"); g_val.setStyleSheet("color: #3498db; font-size: 18px; font-weight: bold; border: none;")
             t_row.addWidget(QLabel("Total:")); t_row.addStretch(); t_row.addWidget(t_val)
             g_row.addWidget(QLabel("Target:")); g_row.addStretch(); g_row.addWidget(g_val)
-            f_layout.addWidget(title); f_layout.addLayout(t_row); f_layout.addLayout(g_row)
+
+            f_layout.addLayout(t_row)
+            f_layout.addLayout(g_row)
+
             self.grid.addWidget(frame, (i-1)//4, (i-1)%4)
             self.instance_widgets[i] = (t_val, g_val)
+
+            if 1 in self.audio_indicators:
+                self.audio_indicators[1].setVisible(True)
 
     def update_instance_count(self):
         try:
@@ -263,9 +292,19 @@ class MasterDashboard(QWidget):
         # Then launch the workers as usual
         QTimer.singleShot(2500, self.launch_workers)
 
+        # --- MUTE WINDOWS ---
+        # Give audio streams a moment to initialize (3 seconds total)
+        QTimer.singleShot(3000, self.mute_all_but_first)
+
         self.is_tracking = True
         self.toggle_btn.setText("🛑 Stop Program")
         self.toggle_btn.setStyleSheet("background-color: #c0392b; font-weight: bold; border: none;")
+    
+    def mute_all_but_first(self):
+        for i, proc in enumerate(self.emulators):
+            # Mute everything except index 0 (Game 1)
+            should_mute = (i != 0)
+            self.set_emu_audio(proc.pid, mute=should_mute)
 
     def launch_workers(self):
         script_path = os.path.abspath(sys.argv[0])
@@ -341,6 +380,75 @@ class MasterDashboard(QWidget):
         }
         with open(config_path, "w") as f:
             json.dump(config, f)
+
+    def set_emu_audio(self, pid, mute=True):
+        """Mutes or unmutes a specific process via pactl."""
+        try:
+            # 1. Find the 'Sink Input' ID associated with the PID
+            # We look for the sink input where 'application.process.id' matches our PID
+            output = subprocess.check_output(["pactl", "list", "sink-inputs"]).decode()
+            
+            target_id = None
+            current_id = None
+            
+            for line in output.splitlines():
+                if "Sink Input #" in line:
+                    current_id = line.split("#")[-1]
+                if f'application.process.id = "{pid}"' in line:
+                    target_id = current_id
+                    break
+            
+            if target_id:
+                state = "1" if mute else "0"
+                subprocess.run(["pactl", "set-sink-input-mute", target_id, state])
+        except Exception as e:
+            print(f"Audio Control Error: {e}")
+    
+    def keyPressEvent(self, event):
+        # Check if keys 1-8 are pressed
+        key = event.text()
+        if key.isdigit() and 1 <= int(key) <= self.num_instances:
+            self.spotlight_instance(int(key) - 1)
+        super().keyPressEvent(event)
+
+    def spotlight_instance(self, index):
+        if index >= len(self.emulators): return
+        
+        for i, proc in enumerate(self.emulators):
+            is_target = (i == index)
+
+            # 1. Handle Audio
+            self.set_emu_audio(proc.pid, mute=not is_target)
+            
+            # 2. Update UI Highlighting
+            indicator = self.audio_indicators.get(i + 1)
+
+            if indicator:
+                indicator.setVisible(is_target)
+                if indicator:
+                    indicator.setVisible(is_target)
+        
+        # 3. Bring the window to front
+        self.focus_window(index)
+
+    def focus_window(self, index):
+        """Uses X11 to raise the spotlighted window."""
+        d = display.Display()
+        try:
+            root = d.screen().root
+            prop = root.get_full_property(d.intern_atom('_NET_CLIENT_LIST'), X.AnyPropertyType)
+            matches = []
+            for wid in prop.value:
+                win = d.create_resource_object('window', wid)
+                if "mGBA" in (win.get_wm_name() or ""): matches.append(win)
+            
+            matches.sort(key=lambda w: w.id)
+            if index < len(matches):
+                # Raise the window to the top of the stack
+                matches[index].configure(stack_mode=X.Above)
+                d.sync()
+        finally:
+            d.close()
 
 # --------------------------------------------------
 # WORKER CLASS
