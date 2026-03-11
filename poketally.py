@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
                              QMessageBox, QLineEdit, QDialog, QDialogButtonBox,
                              QGridLayout, QFrame, QFileDialog, QCheckBox)
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QGuiApplication
 import subprocess
 
 # --------------------------------------------------
@@ -27,6 +28,8 @@ class MasterDashboard(QWidget):
 
         self.debug_dir = os.path.join(self.data_dir, "debug")
         if not os.path.exists(self.debug_dir): os.makedirs(self.debug_dir)
+
+        self.config = self.load_config() # Add this line
         
         self.pokemon_file = "pokemon_list.txt"
         self.workers = []  
@@ -34,6 +37,12 @@ class MasterDashboard(QWidget):
         self.is_tracking = False 
         
         self.master_list = self.load_pokemon_list()
+
+        # --- EMULATION WINDOW GRID CONFIGURATION ---
+        self.emu_w = 480  
+        self.emu_h = 320 
+        self.cols = 3    
+        self.row_gap = 35 # Extra pixels to account for window title bars
         
         self.setWindowTitle("PokeTally MISSION CONTROL")
         self.setMinimumSize(850, 750)
@@ -111,14 +120,16 @@ class MasterDashboard(QWidget):
         config_layout.addWidget(self.debug_check, 0, 2)
 
         config_layout.addWidget(QLabel("Emulator:"), 1, 0)
-        self.emu_path = QLineEdit("/usr/bin/mgba-qt")
+        self.emu_path = QLineEdit(self.config.get("emu_path", "")) # Use config
+        self.emu_path.textChanged.connect(self.save_config) # Save on type
         emu_btn = QPushButton("📁 Browse")
         emu_btn.clicked.connect(self.select_emulator)
         config_layout.addWidget(self.emu_path, 1, 1)
         config_layout.addWidget(emu_btn, 1, 2)
 
         config_layout.addWidget(QLabel("ROM:"), 2, 0)
-        self.rom_path = QLineEdit("")
+        self.rom_path = QLineEdit(self.config.get("rom_path", "")) # Use config
+        self.rom_path.textChanged.connect(self.save_config)        # Save on type
         rom_btn = QPushButton("📁 Browse")
         rom_btn.clicked.connect(self.select_rom)
         config_layout.addWidget(self.rom_path, 2, 1)
@@ -148,13 +159,69 @@ class MasterDashboard(QWidget):
         self.main_layout.addLayout(btn_layout)
         self.setLayout(self.main_layout)
 
+    def reposition_emulators(self):
+        d = None
+        try:
+            # Get Main Monitor Geometry
+            # This ensures we start on the 'Primary' display, not just (0,0)
+            screen = QGuiApplication.primaryScreen().geometry()
+            start_x = screen.x()
+            start_y = screen.y()
+
+            d = display.Display()
+            root = d.screen().root
+            prop = root.get_full_property(d.intern_atom('_NET_CLIENT_LIST'), X.AnyPropertyType)
+            if not prop: return
+
+            # Find all mGBA windows
+            matches = []
+            for wid in prop.value:
+                win = d.create_resource_object('window', wid)
+                name = win.get_wm_name()
+                if name and "mGBA" in name:
+                    matches.append(win)
+            
+            # Sort them so Game 1 is moved first, then Game 2, etc.
+            matches.sort(key=lambda w: w.id)
+
+            for i, win in enumerate(matches):
+                if i >= self.num_instances: break
+                
+                # THE GRID MATH
+                row = i // self.cols
+                col = i % self.cols
+
+                # Use start_x/y to anchor to the correct monitor
+                new_x = start_x + (col * self.emu_w)
+                new_y = start_y + (row * (self.emu_h + self.row_gap))
+                
+                # Tell X11 to move and resize
+                # 12 = Change X, Y, Width, and Height
+                win.configure(
+                    x=new_x, 
+                    y=new_y, 
+                    width=self.emu_w, 
+                    height=self.emu_h, 
+                    border_width=0, 
+                    stack_mode=X.Above
+                )
+            d.sync()
+        except Exception as e:
+            print(f"Positioning Error: {e}")
+        finally:
+            if d: d.close()
+
     def select_emulator(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select Emulator")
-        if path: self.emu_path.setText(path)
+        if path: 
+            self.emu_path.setText(path)
+            self.save_config() # Save after browsing
 
     def select_rom(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select ROM File")
-        if path: self.rom_path.setText(path)
+        if path: 
+            self.rom_path.setText(path)
+            self.save_config() # Save after browsing
 
     def build_grid(self):
         for i in reversed(range(self.grid.count())): 
@@ -189,8 +256,13 @@ class MasterDashboard(QWidget):
         if os.path.exists(emu) and os.path.exists(rom):
             for _ in range(self.num_instances):
                 self.emulators.append(subprocess.Popen([emu, rom]))
+
+        # Wait 1.5 seconds for windows to spawn, then move them
+        QTimer.singleShot(1500, self.reposition_emulators)
         
-        QTimer.singleShot(2000, self.launch_workers)
+        # Then launch the workers as usual
+        QTimer.singleShot(2500, self.launch_workers)
+
         self.is_tracking = True
         self.toggle_btn.setText("🛑 Stop Program")
         self.toggle_btn.setStyleSheet("background-color: #c0392b; font-weight: bold; border: none;")
@@ -253,6 +325,22 @@ class MasterDashboard(QWidget):
                     with open(f_p, "r") as f: d = json.load(f)
                     d["total"], d["target"] = 0, 0
                     with open(f_p, "w") as f: json.dump(d, f)
+    
+    def load_config(self):
+        config_path = os.path.join(self.data_dir, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                return json.load(f)
+        return {"emu_path": "/usr/bin/mgba-qt", "rom_path": ""}
+
+    def save_config(self):
+        config_path = os.path.join(self.data_dir, "config.json")
+        config = {
+            "emu_path": self.emu_path.text(),
+            "rom_path": self.rom_path.text()
+        }
+        with open(config_path, "w") as f:
+            json.dump(config, f)
 
 # --------------------------------------------------
 # WORKER CLASS
@@ -261,6 +349,11 @@ class PokeTally(QWidget):
     def __init__(self, instance_id="1", debug_mode=False):
         super().__init__()
         self.data_dir, self.instance_id, self.debug_mode = "data", instance_id, debug_mode
+
+        # --- ENSURE DEBUG DIR EXISTS ---
+        self.debug_dir = os.path.join(self.data_dir, "debug")
+        if not os.path.exists(self.debug_dir): os.makedirs(self.debug_dir)
+
         print(f"> WORKER {self.instance_id} INITIALIZED")
         
         self.anchor_path = "assets/anchor.png"
@@ -390,17 +483,16 @@ class PokeTally(QWidget):
             gray_roi = cv2.cvtColor(target_roi, cv2.COLOR_BGR2GRAY)
             img_scaled = cv2.resize(gray_roi, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
             _, thresh = cv2.threshold(img_scaled, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            
             raw_text = pytesseract.image_to_string(thresh, config=r'--psm 7').strip().upper()
             
             if self.debug_mode:
                 debug_frame = frame.copy()
                 # Blue: The calculated GAME area (should be perfect 1.5 ratio)
-                cv2.rectangle(debug_frame, (gx, gy), (gx+gw, gy+gh), (255, 0, 0), 2) 
+                cv2.rectangle(debug_frame, (gx, gy), (gx+gw, gy+gh), (255, 0, 0), 2)
                 # Green: The Name ROI
                 cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
-                cv2.imwrite(f"data/debug/match_preview_{self.instance_id}.png", debug_frame)
-                cv2.imwrite(f"data/debug/ocr_debug_{self.instance_id}.png", thresh)
+                cv2.imwrite(os.path.join(self.debug_dir, f"match_preview_{self.instance_id}.png"), debug_frame)
+                cv2.imwrite(os.path.join(self.debug_dir, f"ocr_debug_{self.instance_id}.png"), thresh)
 
             # DETECTION LOGIC
             if len(raw_text) >= 3:
@@ -420,7 +512,6 @@ class PokeTally(QWidget):
                         self.pending_count = 1
             elif len(raw_text) == 0:
                 self.last_detected_name = None
-                
         except Exception as e:
             if self.debug_mode: print(f"Error: {e}")
 
