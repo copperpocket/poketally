@@ -499,7 +499,12 @@ class PokeTally(QWidget):
         for name in self.master_list:
             ratio = SequenceMatcher(None, ocr_text, name).ratio()
             if ratio > highest_ratio: highest_ratio = ratio; best_name = name
-        return (best_name, highest_ratio) if highest_ratio > 0.65 else (None, 0)
+        
+        # LOGGING: See what the OCR is thinking in real-time
+        if self.debug_mode and len(ocr_text) > 1:
+            print(f"[Worker {self.instance_id}] OCR SAW: '{ocr_text}' | MATCH: {best_name} ({highest_ratio:.2f})")
+
+        return (best_name, highest_ratio) if highest_ratio > 0.7 else (None, 0)
 
     def find_window_x11(self):
         d = None
@@ -594,7 +599,7 @@ class PokeTally(QWidget):
             gray_roi = cv2.cvtColor(target_roi, cv2.COLOR_BGR2GRAY)
             img_scaled = cv2.resize(gray_roi, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
             _, thresh = cv2.threshold(img_scaled, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            raw_text = pytesseract.image_to_string(thresh, config=r'--psm 7').strip().upper()
+            raw_text = pytesseract.image_to_string(thresh, config=r'--psm 8').strip().upper()
             
             if self.debug_mode:
                 debug_frame = frame.copy()
