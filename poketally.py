@@ -42,10 +42,11 @@ class MasterDashboard(QWidget):
         self.emu_w = 480  
         self.emu_h = 320 
         self.cols = 3    
-        self.row_gap = 35 # Extra pixels to account for window title bars
+        self.row_gap = 32 # Extra pixels to account for window title bars
+        self.top_padding = 32 # Pushes Row 1 down away from the top monitor
         
         self.setWindowTitle("PokeTally MISSION CONTROL")
-        self.setMinimumSize(850, 750)
+        self.setMinimumSize(850, 850)
         self.setStyleSheet("""
             QWidget { background-color: #121212; color: #ffffff; font-family: 'Segoe UI', sans-serif; }
             QPushButton { background-color: #2c3e50; border: 1px solid #34495e; border-radius: 4px; padding: 5px; }
@@ -193,7 +194,7 @@ class MasterDashboard(QWidget):
 
                 # Use start_x/y to anchor to the correct monitor
                 new_x = start_x + (col * self.emu_w)
-                new_y = start_y + (row * (self.emu_h + self.row_gap))
+                new_y = start_y + self.top_padding + (row * (self.emu_h + self.row_gap))
                 
                 # Tell X11 to move and resize
                 # 12 = Change X, Y, Width, and Height
@@ -264,7 +265,7 @@ class MasterDashboard(QWidget):
             f_layout.addLayout(t_row)
             f_layout.addLayout(g_row)
 
-            self.grid.addWidget(frame, (i-1)//4, (i-1)%4)
+            self.grid.addWidget(frame, (i-1)//3, (i-1)%3)
             self.instance_widgets[i] = (t_val, g_val)
 
             if 1 in self.audio_indicators:
@@ -273,7 +274,9 @@ class MasterDashboard(QWidget):
     def update_instance_count(self):
         try:
             val = int(self.count_input.text())
-            if 1 <= val <= 8: self.num_instances = val; self.build_grid()
+            if 1 <= val <= 9: 
+                self.num_instances = val
+                self.build_grid()
         except: pass
 
     def toggle_program(self):
