@@ -1,8 +1,14 @@
 import sys
 import json
 import os
-from Xlib import display, X
+import cv2
+import pytesseract
+import numpy as np
+import mss
+import time
 from PyQt6.QtWidgets import QCompleter
+from Xlib import display, X
+from difflib import SequenceMatcher
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel,
                              QMessageBox, QLineEdit, QDialog, QDialogButtonBox,
@@ -10,7 +16,6 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QGuiApplication
 import subprocess
-from datetime import datetime
 
 # --------------------------------------------------
 # MASTER DASHBOARD CLASS
@@ -19,21 +24,30 @@ class MasterDashboard(QWidget):
     def __init__(self, num_instances=1):
         super().__init__()
         self.num_instances = num_instances
-        self.data_dir = os.path.abspath("data") # Use Absolute Path
+        self.data_dir = "data"
         if not os.path.exists(self.data_dir): os.makedirs(self.data_dir)
 
-        self.config = self.load_config()
+        self.debug_dir = os.path.join(self.data_dir, "debug")
+        if not os.path.exists(self.debug_dir): os.makedirs(self.debug_dir)
+
+        self.config = self.load_config() # Add this line
+        
         self.pokemon_file = "pokemon_list.txt"
         self.workers = []  
         self.emulators = [] 
         self.is_tracking = False 
+        
         self.master_list = self.load_pokemon_list()
 
-        self.emu_w, self.emu_h, self.cols = 480, 320, 3
-        self.row_gap, self.top_padding = 32, 32
+        # --- EMULATION WINDOW GRID CONFIGURATION ---
+        self.emu_w = 480  
+        self.emu_h = 320 
+        self.cols = 3    
+        self.row_gap = 32 # Extra pixels to account for window title bars
+        self.top_padding = 32 # Pushes Row 1 down away from the top monitor
         
         self.setWindowTitle("PokeTally MISSION CONTROL")
-        self.setMinimumSize(850, 600)
+        self.setMinimumSize(850, 850)
         self.setStyleSheet("""
             QWidget { background-color: #121212; color: #ffffff; font-family: 'Segoe UI', sans-serif; }
             QPushButton { background-color: #2c3e50; border: 1px solid #34495e; border-radius: 4px; padding: 5px; }
@@ -43,6 +57,7 @@ class MasterDashboard(QWidget):
         """)
         
         self.init_ui()
+        
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.update_display)
         self.refresh_timer.start(1000)
@@ -54,164 +69,246 @@ class MasterDashboard(QWidget):
         return []
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        self.main_layout = QVBoxLayout()
+        self.main_layout.setContentsMargins(20, 20, 20, 20)
 
-        header = QFrame(); header.setStyleSheet("background: #1a1a1a; border-radius: 10px; border: 1px solid #333;")
-        h_lay = QVBoxLayout(header)
+        header_frame = QFrame()
+        header_frame.setStyleSheet("background-color: #1a1a1a; border-radius: 10px; border: 1px solid #333;")
+        header_layout = QVBoxLayout(header_frame)
+
         self.target_name_lbl = QLabel("CURRENT TARGET: LOADING...")
+        self.target_name_lbl.setStyleSheet("font-size: 20px; color: #3498db; font-weight: bold; border: none;")
         self.target_name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.target_name_lbl.setStyleSheet("font-size: 20px; color: #3498db; font-weight: bold;")
-        
+
         stats_hbox = QHBoxLayout()
+        t_vbox = QVBoxLayout()
         self.combined_total_lbl = QLabel("0")
-        self.combined_total_lbl.setStyleSheet("font-size: 42px; color: #f1c40f;")
+        self.combined_total_lbl.setStyleSheet("font-size: 42px; font-weight: bold; color: #f1c40f; border: none;")
+        t_sub = QLabel("COMBINED ENCOUNTERS")
+        t_sub.setStyleSheet("font-size: 11px; color: #7f8c8d; border: none;")
+        t_vbox.addWidget(self.combined_total_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
+        t_vbox.addWidget(t_sub, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        tg_vbox = QVBoxLayout()
         self.combined_target_lbl = QLabel("0")
-        self.combined_target_lbl.setStyleSheet("font-size: 42px; color: #3498db;")
+        self.combined_target_lbl.setStyleSheet("font-size: 42px; font-weight: bold; color: #3498db; border: none;")
+        tg_sub = QLabel("TOTAL TARGETS")
+        tg_sub.setStyleSheet("font-size: 11px; color: #7f8c8d; border: none;")
+        tg_vbox.addWidget(self.combined_target_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
+        tg_vbox.addWidget(tg_sub, alignment=Qt.AlignmentFlag.AlignCenter)
         
-        stats_hbox.addWidget(self.combined_total_lbl); stats_hbox.addWidget(self.combined_target_lbl)
-        h_lay.addWidget(self.target_name_lbl); h_lay.addLayout(stats_hbox)
-        layout.addWidget(header)
+        stats_hbox.addLayout(t_vbox)
+        stats_hbox.addLayout(tg_vbox)
+        header_layout.addWidget(self.target_name_lbl)
+        header_layout.addLayout(stats_hbox)
+        self.main_layout.addWidget(header_frame)
 
         self.grid_container = QWidget()
         self.grid = QGridLayout(self.grid_container)
-        layout.addWidget(self.grid_container)
-        self.build_grid()
+        self.main_layout.addWidget(self.grid_container)
+        self.build_grid() 
 
-        cfg_f = QFrame(); cfg_f.setStyleSheet("background: #1a1a1a; border-radius: 8px; padding: 10px;")
-        cfg_l = QGridLayout(cfg_f)
-        self.count_input = QLineEdit(str(self.num_instances)); self.count_input.setFixedWidth(40)
+        config_frame = QFrame()
+        config_frame.setStyleSheet("background-color: #1a1a1a; border-radius: 8px; padding: 10px; border: 1px solid #222;")
+        config_layout = QGridLayout(config_frame)
+
+        config_layout.addWidget(QLabel("Instances:"), 0, 0)
+        self.count_input = QLineEdit(str(self.num_instances))
+        self.count_input.setFixedWidth(40)
         self.count_input.textChanged.connect(self.update_instance_count)
-        self.debug_check = QCheckBox("Enable Verbose Logs")
-        self.emu_path = QLineEdit(self.config.get("emu_path", ""))
-        self.rom_path = QLineEdit(self.config.get("rom_path", ""))
-        
-        cfg_l.addWidget(QLabel("Instances:"), 0, 0); cfg_l.addWidget(self.count_input, 0, 1); cfg_l.addWidget(self.debug_check, 0, 2)
-        cfg_l.addWidget(QLabel("Emulator:"), 1, 0); cfg_l.addWidget(self.emu_path, 1, 1)
-        cfg_l.addWidget(QLabel("ROM:"), 2, 0); cfg_l.addWidget(self.rom_path, 2, 1)
-        layout.addWidget(cfg_f)
+        config_layout.addWidget(self.count_input, 0, 1)
 
-        btn_l = QHBoxLayout()
-        self.toggle_btn = QPushButton("🚀 Start Program"); self.toggle_btn.setMinimumHeight(50)
-        self.toggle_btn.setStyleSheet("background-color: #27ae60; font-weight: bold;")
+        self.debug_check = QCheckBox("Debug Mode (Show OCR logs & Save Images)")
+        config_layout.addWidget(self.debug_check, 0, 2)
+
+        config_layout.addWidget(QLabel("Emulator:"), 1, 0)
+        self.emu_path = QLineEdit(self.config.get("emu_path", "")) # Use config
+        self.emu_path.textChanged.connect(self.save_config) # Save on type
+        emu_btn = QPushButton("📁 Browse")
+        emu_btn.clicked.connect(self.select_emulator)
+        config_layout.addWidget(self.emu_path, 1, 1)
+        config_layout.addWidget(emu_btn, 1, 2)
+
+        config_layout.addWidget(QLabel("ROM:"), 2, 0)
+        self.rom_path = QLineEdit(self.config.get("rom_path", "")) # Use config
+        self.rom_path.textChanged.connect(self.save_config)        # Save on type
+        rom_btn = QPushButton("📁 Browse")
+        rom_btn.clicked.connect(self.select_rom)
+        config_layout.addWidget(self.rom_path, 2, 1)
+        config_layout.addWidget(rom_btn, 2, 2)
+
+        self.main_layout.addWidget(config_frame)
+
+        btn_layout = QHBoxLayout()
+        self.toggle_btn = QPushButton("🚀 Start Program")
+        self.toggle_btn.setMinimumHeight(50)
+        self.toggle_btn.setStyleSheet("background-color: #27ae60; font-weight: bold; border: none;")
         self.toggle_btn.clicked.connect(self.toggle_program)
-        set_btn = QPushButton("Change Target"); set_btn.setMinimumHeight(50)
-        reset_btn = QPushButton("Reset All"); reset_btn.setMinimumHeight(50); reset_btn.setStyleSheet("color: #e74c3c;")
+
+        set_btn = QPushButton("Change Target")
+        set_btn.setMinimumHeight(50)
+        reset_btn = QPushButton("Reset All")
+        reset_btn.setMinimumHeight(50)
+        reset_btn.setStyleSheet("color: #e74c3c; font-weight: bold; border: none;")
         
-        btn_l.addWidget(self.toggle_btn, 2); btn_l.addWidget(set_btn, 1); btn_l.addWidget(reset_btn, 1)
-        set_btn.clicked.connect(self.open_global_settings); reset_btn.clicked.connect(self.reset_all)
-        layout.addLayout(btn_l)
+        btn_layout.addWidget(self.toggle_btn, 2)
+        btn_layout.addWidget(set_btn, 1)
+        btn_layout.addWidget(reset_btn, 1)
+        
+        set_btn.clicked.connect(self.open_global_settings)
+        reset_btn.clicked.connect(self.reset_all)
+
+        self.main_layout.addLayout(btn_layout)
+        self.setLayout(self.main_layout)
 
     def reposition_emulators(self):
         d = None
         try:
+            # Get Main Monitor Geometry
+            # This ensures we start on the 'Primary' display, not just (0,0)
             screen = QGuiApplication.primaryScreen().geometry()
-            d = display.Display(); root = d.screen().root
+            start_x = screen.x()
+            start_y = screen.y()
+
+            d = display.Display()
+            root = d.screen().root
             prop = root.get_full_property(d.intern_atom('_NET_CLIENT_LIST'), X.AnyPropertyType)
             if not prop: return
-            matches = [d.create_resource_object('window', wid) for wid in prop.value if "mGBA" in (d.create_resource_object('window', wid).get_wm_name() or "")]
+
+            # Find all mGBA windows
+            matches = []
+            for wid in prop.value:
+                win = d.create_resource_object('window', wid)
+                name = win.get_wm_name()
+                if name and "mGBA" in name:
+                    matches.append(win)
+            
+            # Sort them so Game 1 is moved first, then Game 2, etc.
             matches.sort(key=lambda w: w.id)
+
             for i, win in enumerate(matches):
                 if i >= self.num_instances: break
-                row, col = i // self.cols, i % self.cols
-                nx = screen.x() + (col * self.emu_w)
-                ny = screen.y() + self.top_padding + (row * (self.emu_h + self.row_gap))
-                win.configure(x=nx, y=ny, width=self.emu_w, height=self.emu_h)
+                
+                # THE GRID MATH
+                row = i // self.cols
+                col = i % self.cols
+
+                # Use start_x/y to anchor to the correct monitor
+                new_x = start_x + (col * self.emu_w)
+                new_y = start_y + self.top_padding + (row * (self.emu_h + self.row_gap))
+                
+                # Tell X11 to move and resize
+                # 12 = Change X, Y, Width, and Height
+                win.configure(
+                    x=new_x, 
+                    y=new_y, 
+                    width=self.emu_w, 
+                    height=self.emu_h, 
+                    border_width=0, 
+                    stack_mode=X.Above
+                )
             d.sync()
-        except: pass
-        finally: 
+        except Exception as e:
+            print(f"Positioning Error: {e}")
+        finally:
             if d: d.close()
+
+    def select_emulator(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select Emulator")
+        if path: 
+            self.emu_path.setText(path)
+            self.save_config() # Save after browsing
+
+    def select_rom(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select ROM File")
+        if path: 
+            self.rom_path.setText(path)
+            self.save_config() # Save after browsing
 
     def build_grid(self):
         for i in reversed(range(self.grid.count())): 
             if self.grid.itemAt(i).widget(): self.grid.itemAt(i).widget().setParent(None)
-        self.instance_widgets, self.audio_indicators = {}, {}
+
+        self.instance_frames = {} # To track the emulation windows
+        self.instance_widgets = {}
+        self.audio_indicators = {} # Track the "Live" icons
+
         for i in range(1, self.num_instances + 1):
-            f = QFrame(); f.setStyleSheet("background: #1e1e1e; border: 1px solid #333;")
-            fl = QVBoxLayout(f)
-            ind = QLabel("🔊 LIVE"); ind.setStyleSheet("color: #27ae60; font-size: 10px;"); ind.setVisible(False)
-            self.audio_indicators[i] = ind
-            t_v = QLabel("Total: 0"); g_v = QLabel("Target: 0")
-            fl.addWidget(ind); fl.addWidget(QLabel(f"GAME {i}")); fl.addWidget(t_v); fl.addWidget(g_v)
-            self.grid.addWidget(f, (i-1)//3, (i-1)%3)
-            self.instance_widgets[i] = (t_v, g_v)
-        if 1 in self.audio_indicators: self.audio_indicators[1].setVisible(True)
+            frame = QFrame()
+            self.instance_frames[i] = frame
+            frame.setStyleSheet("background-color: #1e1e1e; border-radius: 6px; border: 1px solid #333;")
+            
+            f_layout = QVBoxLayout(frame)
+
+            # --- HEADER ROW (Title + Indicator) ---
+            header_row = QHBoxLayout()
+            title = QLabel(f"GAME {i}")
+            title.setStyleSheet("color: #555; font-size: 10px; font-weight: bold; border: none;")
+
+            # Sublte Audio/Live Indicator (Hidden by default)
+            indicator = QLabel("🔊 LIVE") 
+            indicator.setStyleSheet("color: #27ae60; font-size: 10px; font-weight: bold; border: none;")
+            indicator.setVisible(False) 
+            self.audio_indicators[i] = indicator
+
+            header_row.addWidget(title)
+            header_row.addStretch()
+            header_row.addWidget(indicator)
+
+            f_layout.addLayout(header_row)
+
+            t_row, g_row = QHBoxLayout(), QHBoxLayout()
+            t_val = QLabel("0"); t_val.setStyleSheet("color: #f1c40f; font-size: 18px; font-weight: bold; border: none;")
+            g_val = QLabel("0"); g_val.setStyleSheet("color: #3498db; font-size: 18px; font-weight: bold; border: none;")
+            t_row.addWidget(QLabel("Total:")); t_row.addStretch(); t_row.addWidget(t_val)
+            g_row.addWidget(QLabel("Target:")); g_row.addStretch(); g_row.addWidget(g_val)
+
+            f_layout.addLayout(t_row)
+            f_layout.addLayout(g_row)
+
+            self.grid.addWidget(frame, (i-1)//3, (i-1)%3)
+            self.instance_widgets[i] = (t_val, g_val)
+
+            if 1 in self.audio_indicators:
+                self.audio_indicators[1].setVisible(True)
+
+    def update_instance_count(self):
+        try:
+            val = int(self.count_input.text())
+            if 1 <= val <= 9: 
+                self.num_instances = val
+                self.build_grid()
+        except: pass
 
     def toggle_program(self):
         if not self.is_tracking: self.start_program()
         else: self.stop_program()
 
     def start_program(self):
-        emu = os.path.abspath(self.emu_path.text().strip())
-        rom = os.path.abspath(self.rom_path.text().strip())
+        emu, rom = self.emu_path.text().strip(), self.rom_path.text().strip()
+        if os.path.exists(emu) and os.path.exists(rom):
+            for _ in range(self.num_instances):
+                self.emulators.append(subprocess.Popen([emu, rom]))
+
+        # Wait 1.5 seconds for windows to spawn, then move them
+        QTimer.singleShot(1500, self.reposition_emulators)
         
-        if not (os.path.exists(emu) and os.path.exists(rom)):
-            QMessageBox.critical(self, "Error", "Invalid Emulator or ROM path!")
-            return
-
-        bridge_dir = os.path.join(self.data_dir, "bridge")
-        script_dir = os.path.join(self.data_dir, "scripts")
-        os.makedirs(bridge_dir, exist_ok=True)
-        os.makedirs(script_dir, exist_ok=True)
-
-        for i in range(1, self.num_instances + 1):
-            lua_path = os.path.abspath(os.path.join(script_dir, f"worker_{i}.lua"))
-            bridge_path = os.path.abspath(os.path.join(bridge_dir, f"found_{i}.txt"))
-            
-            # --- UPDATED LUA WITH PULSE CHECK ---
-            lua_code = f"""
-            local last_species = 0
-            local timer = 0
-            console:log(">> DEEP SCAN ACTIVE - WATCHING 0x02024020+ <<")
-            
-            function checkEncounter()
-                timer = timer + 1
-                local base = 0x02024020 -- Start slightly earlier to see the whole block
-                
-                -- Print diagnostics every 120 frames (~2 seconds)
-                if timer > 120 then
-                    local line = ""
-                    for offset = 0, 16, 2 do
-                        local val = emu:read16(base + offset)
-                        line = line .. string.format("[%X]:%d  ", base + offset, val)
-                    end
-                    console:log(line)
-                    timer = 0
-                end
-
-                -- Logic to actually catch the Pokemon (we'll refine the address based on your results)
-                -- Checking the most likely candidates for FireRed/LeafGreen
-                local candidate1 = emu:read16(0x0202402C)
-                local candidate2 = emu:read16(0x0202402E)
-                local candidate3 = emu:read16(0x0202443C) -- Common alt for some ROM hacks/versions
-                
-                local found = 0
-                if candidate1 > 0 and candidate1 < 412 then found = candidate1
-                elseif candidate2 > 0 and candidate2 < 412 then found = candidate2
-                elseif candidate3 > 0 and candidate3 < 412 then found = candidate3 end
-
-                if found > 0 and found ~= last_species then
-                    console:log("!! LOGGING ENCOUNTER: ID " .. found)
-                    local f = io.open("{bridge_path}", "w")
-                    if f then f:write(tostring(found)); f:close() end
-                    last_species = found
-                elseif found == 0 then
-                    last_species = 0
-                end
-            end
-            
-            callbacks:add("frame", checkEncounter)
-            """
-            with open(lua_path, "w") as f: f.write(lua_code)
-            
-            # Use absolute path for the script flag
-            self.emulators.append(subprocess.Popen([emu, "-s", lua_path, rom]))
-
-        QTimer.singleShot(2000, self.reposition_emulators)
+        # Then launch the workers as usual
         QTimer.singleShot(2500, self.launch_workers)
+
+        # --- MUTE WINDOWS ---
+        # Give audio streams a moment to initialize (3 seconds total)
         QTimer.singleShot(3000, self.mute_all_but_first)
+
         self.is_tracking = True
-        self.toggle_btn.setText("🛑 Stop Program"); self.toggle_btn.setStyleSheet("background-color: #e74c3c;")
+        self.toggle_btn.setText("🛑 Stop Program")
+        self.toggle_btn.setStyleSheet("background-color: #c0392b; font-weight: bold; border: none;")
+    
+    def mute_all_but_first(self):
+        for i, proc in enumerate(self.emulators):
+            # Mute everything except index 0 (Game 1)
+            should_mute = (i != 0)
+            self.set_emu_audio(proc.pid, mute=should_mute)
 
     def launch_workers(self):
         script_path = os.path.abspath(sys.argv[0])
@@ -219,56 +316,36 @@ class MasterDashboard(QWidget):
         for i in range(1, self.num_instances + 1):
             self.workers.append(subprocess.Popen([sys.executable, script_path, str(i), debug_flag]))
 
-    def mute_all_but_first(self):
-        for i, proc in enumerate(self.emulators): self.set_emu_audio(proc.pid, mute=(i != 0))
-
-    def set_emu_audio(self, pid, mute=True):
-        try:
-            output = subprocess.check_output(["pactl", "list", "sink-inputs"]).decode()
-            target_id, current_id = None, None
-            for line in output.splitlines():
-                if "Sink Input #" in line: current_id = line.split("#")[-1]
-                if f'application.process.id = "{pid}"' in line: target_id = current_id; break
-            if target_id: subprocess.run(["pactl", "set-sink-input-mute", target_id, "1" if mute else "0"])
-        except: pass
-
-    def spotlight_instance(self, index):
-        if index >= len(self.emulators): return
-        for i, proc in enumerate(self.emulators):
-            self.set_emu_audio(proc.pid, mute=(i != index))
-            if (i+1) in self.audio_indicators: self.audio_indicators[i+1].setVisible(i == index)
-
-    def keyPressEvent(self, event):
-        if event.text().isdigit():
-            val = int(event.text())
-            if 1 <= val <= self.num_instances: self.spotlight_instance(val - 1)
-        super().keyPressEvent(event)
-
     def stop_program(self):
         for p in self.workers + self.emulators:
             try: p.terminate()
             except: pass
         self.workers, self.emulators = [], []
         self.is_tracking = False
-        self.toggle_btn.setText("🚀 Start Program"); self.toggle_btn.setStyleSheet("background-color: #27ae60;")
+        self.toggle_btn.setText("🚀 Start Program")
+        self.toggle_btn.setStyleSheet("background-color: #27ae60; font-weight: bold; border: none;")
+
+    def closeEvent(self, event): self.stop_program(); event.accept()
 
     def update_display(self):
-        gt, gg = 0, 0
-        name = "None"
+        grand_total, grand_target = 0, 0
+        current_name = "Rhyhorn"
         for i in range(1, self.num_instances + 1):
-            fp = os.path.join(self.data_dir, f"hunt_stats_{i}.json")
-            if os.path.exists(fp):
-                with open(fp, "r") as f:
+            f_p = os.path.join(self.data_dir, f"hunt_stats_{i}.json")
+            if os.path.exists(f_p):
+                with open(f_p, "r") as f:
                     d = json.load(f)
                     if i in self.instance_widgets:
-                        self.instance_widgets[i][0].setText(f"Total: {d.get('total', 0)}")
-                        self.instance_widgets[i][1].setText(f"Target: {d.get('target', 0)}")
-                    gt += d.get("total", 0); gg += d.get("target", 0); name = d.get("target_name", "???")
-        self.combined_total_lbl.setText(str(gt)); self.combined_target_lbl.setText(str(gg))
-        self.target_name_lbl.setText(f"GLOBAL TARGET: {name.upper()}")
+                        self.instance_widgets[i][0].setText(str(d.get("total", 0)))
+                        self.instance_widgets[i][1].setText(str(d.get("target", 0)))
+                    grand_total += d.get("total", 0); grand_target += d.get("target", 0)
+                    current_name = d.get("target_name", "???")
+        self.combined_total_lbl.setText(str(grand_total))
+        self.combined_target_lbl.setText(str(grand_target))
+        self.target_name_lbl.setText(f"GLOBAL TARGET: {current_name.upper()}")
 
     def open_global_settings(self):
-        dialog = QDialog(self); dialog.setWindowTitle("Set Target")
+        dialog = QDialog(self); dialog.setWindowTitle("Target")
         l = QVBoxLayout(dialog); p_in = QLineEdit()
         comp = QCompleter(self.master_list); comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         p_in.setCompleter(comp); l.addWidget(QLabel("Target Pokemon:")); l.addWidget(p_in)
@@ -278,10 +355,7 @@ class MasterDashboard(QWidget):
             new_t = p_in.text().strip().capitalize()
             for i in range(1, 10):
                 f_p = os.path.join(self.data_dir, f"hunt_stats_{i}.json")
-                # Ensure the file exists before writing to it
-                if not os.path.exists(f_p):
-                    with open(f_p, "w") as f: json.dump({"total": 0, "target": 0, "target_name": new_t}, f)
-                else:
+                if os.path.exists(f_p):
                     with open(f_p, "r") as f: d = json.load(f)
                     d["target_name"] = new_t
                     with open(f_p, "w") as f: json.dump(d, f)
@@ -294,82 +368,308 @@ class MasterDashboard(QWidget):
                     with open(f_p, "r") as f: d = json.load(f)
                     d["total"], d["target"] = 0, 0
                     with open(f_p, "w") as f: json.dump(d, f)
-
+    
     def load_config(self):
-        cp = os.path.join(self.data_dir, "config.json")
-        return json.load(open(cp, "r")) if os.path.exists(cp) else {"emu_path": "/usr/bin/mgba-qt", "rom_path": ""}
+        config_path = os.path.join(self.data_dir, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                return json.load(f)
+        return {"emu_path": "/usr/bin/mgba-qt", "rom_path": ""}
 
     def save_config(self):
-        cp = os.path.join(self.data_dir, "config.json")
-        with open(cp, "w") as f: json.dump({"emu_path": self.emu_path.text(), "rom_path": self.rom_path.text()}, f)
+        config_path = os.path.join(self.data_dir, "config.json")
+        config = {
+            "emu_path": self.emu_path.text(),
+            "rom_path": self.rom_path.text()
+        }
+        with open(config_path, "w") as f:
+            json.dump(config, f)
 
-    def update_instance_count(self):
+    def set_emu_audio(self, pid, mute=True):
+        """Mutes or unmutes a specific process via pactl."""
         try:
-            val = int(self.count_input.text())
-            if 1 <= val <= 9: self.num_instances = val; self.build_grid()
-        except: pass
+            # 1. Find the 'Sink Input' ID associated with the PID
+            # We look for the sink input where 'application.process.id' matches our PID
+            output = subprocess.check_output(["pactl", "list", "sink-inputs"]).decode()
+            
+            target_id = None
+            current_id = None
+            
+            for line in output.splitlines():
+                if "Sink Input #" in line:
+                    current_id = line.split("#")[-1]
+                if f'application.process.id = "{pid}"' in line:
+                    target_id = current_id
+                    break
+            
+            if target_id:
+                state = "1" if mute else "0"
+                subprocess.run(["pactl", "set-sink-input-mute", target_id, state])
+        except Exception as e:
+            print(f"Audio Control Error: {e}")
+    
+    def keyPressEvent(self, event):
+        # Check if keys 1-8 are pressed
+        key = event.text()
+        if key.isdigit() and 1 <= int(key) <= self.num_instances:
+            self.spotlight_instance(int(key) - 1)
+        super().keyPressEvent(event)
+
+    def spotlight_instance(self, index):
+        if index >= len(self.emulators): return
+        
+        for i, proc in enumerate(self.emulators):
+            is_target = (i == index)
+
+            # 1. Handle Audio
+            self.set_emu_audio(proc.pid, mute=not is_target)
+            
+            # 2. Update UI Highlighting
+            indicator = self.audio_indicators.get(i + 1)
+
+            if indicator:
+                indicator.setVisible(is_target)
+                if indicator:
+                    indicator.setVisible(is_target)
+        
+        # 3. Bring the window to front
+        self.focus_window(index)
+
+    def focus_window(self, index):
+        """Uses X11 to raise the spotlighted window."""
+        d = display.Display()
+        try:
+            root = d.screen().root
+            prop = root.get_full_property(d.intern_atom('_NET_CLIENT_LIST'), X.AnyPropertyType)
+            matches = []
+            for wid in prop.value:
+                win = d.create_resource_object('window', wid)
+                if "mGBA" in (win.get_wm_name() or ""): matches.append(win)
+            
+            matches.sort(key=lambda w: w.id)
+            if index < len(matches):
+                # Raise the window to the top of the stack
+                matches[index].configure(stack_mode=X.Above)
+                d.sync()
+        finally:
+            d.close()
 
 # --------------------------------------------------
 # WORKER CLASS
 # --------------------------------------------------
-POKEDEX = {
-    111: "Rhyhorn", 115: "Kangaskhan", 123: "Scyther", 127: "Pinsir", 
-    128: "Tauros", 46: "Paras", 47: "Parasect", 48: "Venonat", 
-    49: "Venomoth", 102: "Exeggcute", 32: "Nidoran", 33: "Nidorino",
-    29: "Nidoran", 30: "Nidorina", 113: "Chansey", 16: "Pidgey", 19: "Rattata"
-}
-
 class PokeTally(QWidget):
     def __init__(self, instance_id="1", debug_mode=False):
         super().__init__()
-        self.data_dir = os.path.abspath("data")
-        self.instance_id, self.debug_mode = instance_id, debug_mode
-        self.bridge_file = os.path.join(self.data_dir, "bridge", f"found_{self.instance_id}.txt")
+        self.data_dir, self.instance_id, self.debug_mode = "data", instance_id, debug_mode
+
+        # --- ENSURE DEBUG DIR EXISTS ---
+        self.debug_dir = os.path.join(self.data_dir, "debug")
+        if not os.path.exists(self.debug_dir): os.makedirs(self.debug_dir)
+
+        print(f"> WORKER {self.instance_id} INITIALIZED")
+        
+        self.anchor_path = "assets/anchor.png"
         self.file_path = os.path.join(self.data_dir, f"hunt_stats_{self.instance_id}.json")
-        self.log_file = os.path.join(self.data_dir, f"worker_{self.instance_id}_log.txt")
+        self.pokemon_file = "pokemon_list.txt"
+        self.pending_name, self.pending_count, self.last_detected_name = None, 0, None
         
         self.data = self.load_data()
-        self.memory_timer = QTimer()
-        self.memory_timer.timeout.connect(self.scan_memory)
-        self.memory_timer.start(500)
-        self.log(f"--- WORKER {self.instance_id} STARTED ---")
+        self.master_list = self.load_pokemon_list()
+        self.sct = mss.mss()
 
-    def log(self, msg):
-        ts = datetime.now().strftime("%H:%M:%S")
-        with open(self.log_file, "a") as f: f.write(f"[{ts}] {msg}\n")
-        if self.debug_mode: print(f"[W{self.instance_id}] {msg}")
+        self.template = cv2.imread('assets/battle_anchor.png', 0) # Load as grayscale
+        self.in_battle = False # State tracker to prevent double-counting
+        self.threshold = 0.8   # 80% match required
+
+        self.detector_timer = QTimer()
+        self.detector_timer.timeout.connect(self.scan_for_pokemon)
+        self.detector_timer.start(400)
+
+    def load_pokemon_list(self):
+        if os.path.exists(self.pokemon_file):
+            with open(self.pokemon_file, "r") as f: return [line.strip().upper() for line in f if len(line.strip()) > 2]
+        return []
 
     def load_data(self):
         if os.path.exists(self.file_path):
             with open(self.file_path, "r") as f: return json.load(f)
-        return {"total": 0, "target": 0, "target_name": "Rhyhorn"}
+        return {"total": 0, "target": 0, "target_name": "Rhyhorn", "window_title": "mGBA"}
 
-    def scan_memory(self):
-        if os.path.exists(self.bridge_file):
-            try:
-                with open(self.bridge_file, "r") as f:
-                    content = f.read().strip()
-                    if not content: return
-                    sid = int(content)
-                
-                p_name = POKEDEX.get(sid, f"Unknown_{sid}")
-                self.log(f"Bridge Read: ID {sid} -> {p_name}")
-                
-                self.data['total'] += 1
-                if p_name.upper() == self.data["target_name"].upper():
-                    self.data['target'] += 1
-                    self.log("MATCH FOUND! Target updated.")
-                
-                with open(self.file_path, "w") as f: json.dump(self.data, f)
-                os.remove(self.bridge_file)
-            except Exception as e:
-                self.log(f"SCAN ERROR: {e}")
+    def save_data(self):
+        with open(self.file_path, "w") as f: json.dump(self.data, f)
+
+    def get_best_match(self, ocr_text):
+        ocr_text = ocr_text.upper().strip()
+        best_name, highest_ratio = None, 0
+        for name in self.master_list:
+            ratio = SequenceMatcher(None, ocr_text, name).ratio()
+            if ratio > highest_ratio: highest_ratio = ratio; best_name = name
+        
+        # LOGGING: See what the OCR is thinking in real-time
+        if self.debug_mode and len(ocr_text) > 1:
+            print(f"[Worker {self.instance_id}] OCR SAW: '{ocr_text}' | MATCH: {best_name} ({highest_ratio:.2f})")
+
+        return (best_name, highest_ratio) if highest_ratio > 0.7 else (None, 0)
+
+    def find_window_x11(self):
+        d = None
+        try:
+            d = display.Display(); root = d.screen().root
+            prop = root.get_full_property(d.intern_atom('_NET_CLIENT_LIST'), X.AnyPropertyType)
+            if not prop: return None
+            matches = []
+            for wid in prop.value:
+                win = d.create_resource_object('window', wid)
+                name = win.get_wm_name()
+                if name and "mGBA" in name: matches.append(wid)
+            matches.sort()
+            idx = int(self.instance_id) - 1
+            if idx < len(matches):
+                win = d.create_resource_object('window', matches[idx])
+                pos, geom = root.translate_coords(matches[idx], 0, 0), win.get_geometry()
+                return {'left': pos.x, 'top': pos.y, 'width': geom.width, 'height': geom.height}
+        except: pass
+        finally: 
+            if d: d.close()
+        return None
+
+    def get_game_bounds(self, frame):
+        """Mathematically fits a 1.5 ratio GBA screen into the window, accounting for UI."""
+        h_full, w_full = frame.shape[:2]
+        
+        # 1. FIND THE CONTENT AREA (Ignore black bars on the very edges)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
+        coords = cv2.findNonZero(thresh)
+        
+        if coords is None: return None
+        
+        # This is the box containing [Menu Bar + Game + any internal black bars]
+        cx, cy, cw, ch = cv2.boundingRect(coords)
+        
+        # 2. DEFINE THE MENU BAR HEIGHT
+        # In mGBA-qt on Linux, the menu is usually ~25-30 pixels.
+        # We'll use 28 as a standard. If your green box is slightly low, decrease this.
+        # If your green box is slightly high, increase this.
+        MENU_H = 22
+        
+        # The area available for the game
+        avail_w = cw
+        avail_h = ch - MENU_H
+        
+        target_ratio = 1.5 # GBA standard
+        
+        # 3. CALCULATE GAME BOX BASED ON ASPECT RATIO
+        if (avail_w / avail_h) > target_ratio:
+            # Window is too wide (Pillarboxed: black bars on left/right)
+            gh = avail_h
+            gw = int(gh * target_ratio)
+            gx = cx + (avail_w - gw) // 2
+            gy = cy + MENU_H
+        else:
+            # Window is too tall (Letterboxed: black bars on top/bottom)
+            gw = avail_w
+            gh = int(gw / target_ratio)
+            gx = cx
+            gy = cy + MENU_H + (avail_h - gh) // 2
+            
+        return (gx, gy, gw, gh)
+
+    def scan_for_pokemon(self):
+        win = self.find_window_x11()
+        if not win: return
+        
+        try:
+            sct_img = self.sct.grab(win)
+            raw_frame = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
+            bounds = self.get_game_bounds(raw_frame)
+            if not bounds: return
+            
+            gx, gy, gw, gh = bounds
+            game_area = raw_frame[gy:gy+gh, gx:gx+gw]
+            
+            # STANDARDIZE
+            std_w, std_h = 480, 320
+            game_std = cv2.resize(game_area, (std_w, std_h), interpolation=cv2.INTER_LINEAR)
+            gray_std = cv2.cvtColor(game_std, cv2.COLOR_BGR2GRAY)
+
+            # TEMPLATE MATCH
+            res = cv2.matchTemplate(gray_std, self.template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+
+            if max_val >= self.threshold:
+                if not self.in_battle:
+                    # --- THE FIX: WAIT FOR ANIMATION ---
+                    # We wait 0.5 seconds for the name to finish sliding in
+                    import time
+                    time.sleep(0.5)
+                    
+                    # Re-grab the frame after the sleep to get the "settled" name
+                    sct_img = self.sct.grab(win)
+                    raw_frame = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
+                    game_area = raw_frame[gy:gy+gh, gx:gx+gw]
+                    game_std = cv2.resize(game_area, (std_w, std_h), interpolation=cv2.INTER_LINEAR)
+                    
+                    self.in_battle = True
+                    self.data['total'] += 1
+                    
+                    # --- THE FIX: TIGHTENED ROI ---
+                    # [y_start:y_end, x_start:x_end]
+                    # We move y down to 42, x in to 38, and end x at 155 to dodge the 'L'
+                    name_roi = game_std[42:58, 38:155] 
+                    detected_text = self.perform_ocr(name_roi)
+                    
+                    if detected_text:
+                        best_match, conf = self.get_best_match(detected_text)
+                        if self.debug_mode:
+                            print(f"[Worker {self.instance_id}] OCR RESULT: {detected_text} -> {best_match}")
+                        
+                        if best_match == self.data["target_name"].upper():
+                            self.data['target'] += 1
+                    
+                    self.save_data()
+            else:
+                self.in_battle = False
+
+        except Exception as e:
+            if self.debug_mode: print(f"Scan Error: {e}")
+
+        
+    def perform_ocr(self, roi):
+        try:
+            # 1. Convert to Gray and Upscale
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            upscaled = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+            
+            # 2. Clean up noise (removes those tiny stray dots)
+            denoised = cv2.medianBlur(upscaled, 3)
+            
+            # 3. Threshold (Black background, White text)
+            _, thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            
+            # 4. Dilation (Boldens the pixels so they connect)
+            kernel = np.ones((3, 3), np.uint8)
+            dilated = cv2.dilate(thresh, kernel, iterations=1)
+            
+            if self.debug_mode:
+                cv2.imwrite(os.path.join(self.debug_dir, f"ocr_trigger_{self.instance_id}.png"), dilated)
+            
+            # 5. OCR with Whitelist and PSM 8 (Single Word)
+            # tessedit_char_whitelist limits the "alphabet" Tesseract uses
+            custom_config = r'--psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ-'
+            text = pytesseract.image_to_string(dilated, config=custom_config).strip().upper()
+            
+            return text
+        except Exception as e:
+            if self.debug_mode: print(f"OCR Logic Error: {e}")
+            return None
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     if len(sys.argv) == 1:
-        window = MasterDashboard(); window.show()
+        window = MasterDashboard()
+        window.show()
     else:
-        is_debug = (sys.argv[2] == "debug")
+        is_debug = (sys.argv[2] == "debug") if len(sys.argv) > 2 else False
         worker = PokeTally(instance_id=sys.argv[1], debug_mode=is_debug)
     sys.exit(app.exec())
