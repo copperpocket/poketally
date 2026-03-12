@@ -1,0 +1,7 @@
+[19:53:09] Worker 2 online. Target: Rhyhorn
+[19:56:23] --- WORKER 2 STARTED ---
+[19:58:40] --- WORKER 2 STARTED ---
+[20:02:51] --- WORKER 2 STARTED ---
+[20:03:05] --- WORKER 2 STARTED ---
+[20:10:46] --- WORKER 2 STARTED ---
+[20:10:52] --- WORKER 2 STARTED ---
