@@ -32,7 +32,7 @@ class MasterDashboard(QWidget):
 
         self.config = self.load_config() # Add this line
         
-        self.pokemon_file = "pokemon_list.txt"
+        self.pokemon_file = "data/pokemon_list.txt"
         self.workers = []  
         self.emulators = [] 
         self.is_tracking = False 
@@ -470,7 +470,7 @@ class PokeTally(QWidget):
         
         self.anchor_path = "assets/anchor.png"
         self.file_path = os.path.join(self.data_dir, f"hunt_stats_{self.instance_id}.json")
-        self.pokemon_file = "pokemon_list.txt"
+        self.pokemon_file = "data/pokemon_list.txt"
         self.pending_name, self.pending_count, self.last_detected_name = None, 0, None
         
         self.data = self.load_data()
@@ -608,7 +608,7 @@ class PokeTally(QWidget):
                     sct_img = self.sct.grab(win)
                     raw_frame = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
                     game_area = raw_frame[gy:gy+gh, gx:gx+gw]
-                    game_std = cv2.resize(game_area, (std_w, std_h), interpolation=cv2.INTER_LINEAR)
+                    game_std = cv2.resize(game_area, (std_w, std_h), interpolation=cv2.INTER_NEAREST)
                     
                     self.in_battle = True
                     self.data['total'] += 1
@@ -616,11 +616,13 @@ class PokeTally(QWidget):
                     # --- THE FIX: TIGHTENED ROI ---
                     # [y_start:y_end, x_start:x_end]
                     # We move y down to 42, x in to 38, and end x at 155 to dodge the 'L'
-                    name_roi = game_std[42:58, 38:155] 
+                    name_roi = game_std[40:60, 38:155] 
                     detected_text = self.perform_ocr(name_roi)
                     
                     if detected_text:
-                        best_match, conf = self.get_best_match(detected_text)
+                        # Clean the text BEFORE matching
+                        cleaned_text = self.clean_ocr_text(detected_text)
+                        best_match, conf = self.get_best_match(cleaned_text)
                         if self.debug_mode:
                             print(f"[Worker {self.instance_id}] OCR RESULT: {detected_text} -> {best_match}")
                         
@@ -637,32 +639,44 @@ class PokeTally(QWidget):
         
     def perform_ocr(self, roi):
         try:
-            # 1. Convert to Gray and Upscale
+            # 1. Grayscale
             gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            upscaled = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
             
-            # 2. Clean up noise (removes those tiny stray dots)
-            denoised = cv2.medianBlur(upscaled, 3)
+            # 2. Rescale 3x using NEAREST NEIGHBOR 
+            # (Nearest keeps the pixels sharp and blocky, like a real GBA)
+            # upscaled = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
             
-            # 3. Threshold (Black background, White text)
-            _, thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            # 3. Simple Binary Threshold (No thickening)
+            # We want the letters to be pure white on pure black without extra "weight"
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             
-            # 4. Dilation (Boldens the pixels so they connect)
-            kernel = np.ones((3, 3), np.uint8)
-            dilated = cv2.dilate(thresh, kernel, iterations=1)
-            
+            # 4. Invert for Tesseract
+            final_input = cv2.bitwise_not(thresh)
+
             if self.debug_mode:
-                cv2.imwrite(os.path.join(self.debug_dir, f"ocr_trigger_{self.instance_id}.png"), dilated)
+                cv2.imwrite(os.path.join(self.debug_dir, f"clean_pixel_{self.instance_id}.png"), final_input)
+
+            # 5. GBA-Only OCR
+            custom_config = r'--psm 8 -l pkmngba_en'
+            res = pytesseract.image_to_string(final_input, config=custom_config).strip().upper()
             
-            # 5. OCR with Whitelist and PSM 8 (Single Word)
-            # tessedit_char_whitelist limits the "alphabet" Tesseract uses
-            custom_config = r'--psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ-'
-            text = pytesseract.image_to_string(dilated, config=custom_config).strip().upper()
-            
-            return text
+            return res
         except Exception as e:
-            if self.debug_mode: print(f"OCR Logic Error: {e}")
             return None
+
+    def clean_ocr_text(self, text):
+        """Hard-coded fixes for common GBA pixel-font misreads."""
+        replacements = {
+            'UENO': 'VENO',   # Venonat fix
+            'RHU': 'RHY',     # Rhyhorn fix
+            'RHV': 'RHY',     # Alternate Rhyhorn misread
+            'EHEG': 'EXEG',   # Exeggcute fix
+            'CHF': 'CHA',     # Chansey fix
+        }
+        for fault, fix in replacements.items():
+            if fault in text:
+                text = text.replace(fault, fix)
+        return text
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

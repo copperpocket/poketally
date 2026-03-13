@@ -1,4 +1,0 @@
-[19:53:09] Worker 4 online. Target: Rhyhorn
-[19:56:23] --- WORKER 4 STARTED ---
-[20:10:46] --- WORKER 4 STARTED ---
-[20:10:52] --- WORKER 4 STARTED ---
